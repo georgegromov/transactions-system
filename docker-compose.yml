@@ -1,0 +1,228 @@
+volumes:
+  transactions-db-data:
+  balances-db-data:
+
+networks:
+  transactions-system-network:
+    driver: bridge
+
+services:
+  # Zookeeper
+  zookeeper:
+    container_name: zookeeper
+    image: confluentinc/cp-zookeeper:7.7.0
+    ports:
+      - "${ZOOKEEPER_CLIENT_PORT}:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: ${ZOOKEEPER_CLIENT_PORT}
+      ZOOKEEPER_TICK_TIME: ${ZOOKEEPER_TICK_TIME}
+    networks:
+      - transactions-system-network
+
+  #Kafka
+  kafka:
+    container_name: kafka
+    image: confluentinc/cp-kafka:7.7.0
+    ports:
+      - "${KAFKA_PORT}:29092"
+    environment:
+      KAFKA_BROKER_ID: ${KAFKA_BROKER_ID}
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: ${KAFKA_LISTENER_SECURITY_PROTOCOL_MAP}
+      KAFKA_ADVERTISED_LISTENERS: ${KAFKA_ADVERTISED_LISTENERS}
+      KAFKA_LISTENERS: ${KAFKA_LISTENERS}
+      KAFKA_INTER_BROKER_LISTENER_NAME: ${KAFKA_INTER_BROKER_LISTENER_NAME}
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: ${KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR}
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: ${KAFKA_TRANSACTION_STATE_LOG_MIN_ISR}
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: ${KAFKA_AUTO_CREATE_TOPICS_ENABLE}
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:29092"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+    networks:
+      - transactions-system-network
+
+  # Kafka UI
+  kafka-ui:
+    container_name: kafka-ui
+    image: provectuslabs/kafka-ui:latest
+    ports:
+      - "${KAFKA_UI_PORT}:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: ${KAFKA_UI_CLUSTERS_0_NAME}
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: ${KAFKA_UI_CLUSTERS_0_BOOTSTRAPSERVERS}
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - transactions-system-network
+
+  # Transactions Database
+  transactions-db:
+    container_name: transactions-db
+    image: postgres:16
+    ports:
+      - "5444:5432"
+    environment:
+      POSTGRES_USER: ${TRANSACTIONS_DB_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${TRANSACTIONS_DB_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${TRANSACTIONS_DB_POSTGRES_DB}
+    volumes:
+      - transactions-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TRANSACTIONS_DB_POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - transactions-system-network
+
+  # Balances Database
+  balances-db:
+    container_name: balances-db
+    image: postgres:16
+    ports:
+      - "5445:5432"
+    environment:
+      POSTGRES_USER: ${BALANCES_DB_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${BALANCES_DB_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${BALANCES_DB_POSTGRES_DB}
+    volumes:
+      - balances-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${BALANCES_DB_POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - transactions-system-network
+
+  # Migrate Transactions Database
+  migrate-transactions-db:
+    container_name: migrate-transactions-db
+    image: migrate/migrate:v4.18.2
+    command:
+      - "-path=/migrations"
+      - "-database"
+      - "postgres://${TRANSACTIONS_DB_POSTGRES_USER}:${TRANSACTIONS_DB_POSTGRES_PASSWORD}@transactions-db:5432/${TRANSACTIONS_DB_POSTGRES_DB}?sslmode=disable"
+      - "up"
+    volumes:
+      - ./migrations/transactions:/migrations
+    depends_on:
+      transactions-db:
+        condition: service_healthy
+    networks:
+      - transactions-system-network
+  
+  # Migrate Balances Database
+  migrate-balances-db:
+    container_name: migrate-balances-db
+    image: migrate/migrate:v4.18.2
+    command:
+      - "-path=/migrations"
+      - "-database"
+      - "postgres://${BALANCES_DB_POSTGRES_USER}:${BALANCES_DB_POSTGRES_PASSWORD}@balances-db:5432/${BALANCES_DB_POSTGRES_DB}?sslmode=disable"
+      - "up"
+    volumes:
+      - ./migrations/balances:/migrations
+    depends_on:
+      balances-db:
+        condition: service_healthy
+    networks:
+      - transactions-system-network
+
+  # Transaction Processor
+  transaction-processor:
+    container_name: transaction-processor
+    build:
+      context: .
+      dockerfile: services/transaction-processor/Dockerfile
+    env_file:
+      - .env
+    ports:
+      - "${TRANSACTION_PROCESSOR_PORT}:8081"
+    depends_on:
+      transactions-db:
+        condition: service_healthy
+      migrate-transactions-db:
+        condition: service_completed_successfully
+      consul:
+        condition: service_started
+    networks:
+      - transactions-system-network
+
+  # Outbox Processor
+  outbox-processor:
+    container_name: outbox-processor
+    build:
+      context: .
+      dockerfile: services/outbox-processor/Dockerfile
+    env_file:
+      - .env
+    ports:
+      - "${OUTBOX_PROCESSOR_PORT}:8082"
+    depends_on:
+      transactions-db:
+        condition: service_healthy
+      migrate-transactions-db:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_healthy
+      consul:
+        condition: service_started
+    networks:
+      - transactions-system-network
+
+  # Inbox Processor
+  inbox-processor:
+    container_name: inbox-processor
+    build:
+      context: .
+      dockerfile: services/inbox-processor/Dockerfile
+    env_file:
+      - .env
+    ports:
+      - "${INBOX_PROCESSOR_PORT}:8083"
+    depends_on:
+      balances-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      migrate-balances-db:
+        condition: service_completed_successfully
+      consul:
+        condition: service_started
+    networks:
+      - transactions-system-network
+
+  # # Balance Viewer
+  balance-viewer:
+    container_name: balance-viewer
+    build:
+      context: .
+      dockerfile: services/balance-viewer/Dockerfile
+    env_file:
+      - .env
+    ports:
+      - "${BALANCE_VIEWER_PORT}:8084"
+    depends_on:
+      balances-db:
+        condition: service_healthy
+      migrate-balances-db:
+        condition: service_completed_successfully
+      consul:
+        condition: service_started
+    networks:
+      - transactions-system-network
+
+  # Consul Service Discovery
+  consul:
+    container_name: service-discovery-consul
+    image: hashicorp/consul:1.20
+    command: agent -dev -ui -client=0.0.0.0
+    ports:
+      - "8500:8500"
+    networks:
+      - transactions-system-network

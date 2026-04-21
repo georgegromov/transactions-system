@@ -1,0 +1,11 @@
+go 1.26.1
+
+use (
+	./common
+	./services/api-gateway
+	./services/auth
+	./services/balance-viewer
+	./services/inbox-processor
+	./services/outbox-processor
+	./services/transaction-processor
+)
